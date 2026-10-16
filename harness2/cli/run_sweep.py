@@ -70,6 +70,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="print the stream order, the namespaces and the split's domains, then "
         "exit — no rollouts, no sessions, nothing written",
     )
+    g.add_argument(
+        "--feedback-dir",
+        type=Path,
+        default=None,
+        help="folder of human feedback, one <task>.md per task ('/' in a task id becomes "
+        "'__'), shown to the selector and the experience session. Leave it off for benchmark "
+        "runs: feedback hints at the answer",
+    )
     return p
 
 
@@ -131,6 +139,8 @@ def main(argv: list[str] | None = None) -> int:
 def _main(args: argparse.Namespace) -> int:
     if args.k < 1 or args.workers < 1:
         raise ValueError("--k and --workers must be positive")
+    if args.feedback_dir is not None and not args.feedback_dir.is_dir():
+        raise FileNotFoundError(f"--feedback-dir {args.feedback_dir} is not a directory")
     modes = C.parse_modes(args.modes)
 
     if args.dry_run:
@@ -170,6 +180,7 @@ def _main(args: argparse.Namespace) -> int:
         only_domains=only,
         max_tasks=args.max_tasks,
         pool_policy="finals",
+        feedback_dir=args.feedback_dir,
     )
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")

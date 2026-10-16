@@ -21,11 +21,19 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from harness2 import config
-from harness2.core import context, judge, recursion, schedule, tree
+from harness2.core import context, feedback, judge, recursion, schedule, tree
 from harness2.core.library import Library
 from harness2.core.proposer import Proposer, ProposerError, Reply
 from harness2.core.spec import resolve_channel_model
 from harness2.demo import BASE_SCRIPT, DemoAdapter, DemoProposer
+
+
+class MissionLog(DemoProposer):
+    """DemoProposer that keeps (label, context dir, mission) for every session."""
+
+    def call(self, mission, context_dir, label, **kwargs):
+        self.__dict__.setdefault("missions", []).append((label, str(context_dir), mission))
+        return super().call(mission, context_dir, label, **kwargs)
 
 
 class WorkflowTests(unittest.TestCase):
@@ -36,7 +44,7 @@ class WorkflowTests(unittest.TestCase):
         self.adapter = DemoAdapter(self.root)
         self.proposer = DemoProposer(self.adapter.spec.channels["proposer"])
 
-    def run_stream(self, k=2, proposer=None):
+    def run_stream(self, k=2, proposer=None, feedback_dir=None):
         return schedule.run_domain(
             "accounting",
             self.adapter.tasks(),
@@ -45,6 +53,7 @@ class WorkflowTests(unittest.TestCase):
             prop=proposer or self.proposer,
             runs_root=self.adapter.spec.runs_root,
             library_root=self.root / "library" / str(k),
+            feedback_dir=feedback_dir,
         )
 
     def test_recursion_budget_and_resume(self):
@@ -223,6 +232,86 @@ class WorkflowTests(unittest.TestCase):
         )
         self.adapter.score.assert_not_called()
         self.assertEqual((rows[0].graded, rows[0].n_passed), (False, None))
+
+    def test_feedback_reaches_selection_and_reflection_only(self):
+        feedback_dir = self.root / "feedback"
+        feedback_dir.mkdir()
+        note = "Credits are part of the total: keep the negative amounts."
+        (feedback_dir / "ledger-1.md").write_text(note + "\n")
+        proposer = MissionLog(self.proposer.spec)
+        self.run_stream(proposer=proposer, feedback_dir=feedback_dir)
+        runs = self.adapter.spec.runs_root
+        for mode in ("agg", "seq"):
+            work = runs / f"demo-oc-{mode}2" / "ledger-1"
+            for where in ("selection", "reflection"):
+                self.assertEqual((work / where / f"{mode}2/feedback.md").read_text(), note + "\n")
+            self.assertTrue((work / f"reflection/{mode}2.experience/feedback.md").is_file())
+        self.assertEqual(list(runs.glob("*/ledger-2/**/feedback.md")), [])
+        for label, where, mission in proposer.missions:
+            reviewed = "/ledger-1/" in where and label.startswith(("select.", "experience."))
+            with self.subTest(label=label, where=where):
+                self.assertEqual("A PERSON HAS REVIEWED THIS TASK" in mission, reviewed)
+                self.assertEqual("context/feedback.md" in mission, reviewed)
+        selections = json.loads((runs / "demo-oc-agg2/ledger-1/summary.json").read_text())
+        self.assertEqual(
+            {sel["feedback_fingerprint"] for sel in selections["selections"].values()},
+            {feedback.fingerprint(note)},
+        )
+        other = json.loads((runs / "demo-oc-agg2/ledger-2/summary.json").read_text())
+        self.assertFalse(any("feedback_fingerprint" in sel for sel in other["selections"].values()))
+
+    def test_feedback_off_changes_nothing_and_new_feedback_reruns_its_task(self):
+        plain = MissionLog(self.proposer.spec)
+        self.run_stream(proposer=plain)
+
+        second = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        adapter = DemoAdapter(second)
+        (second / "feedback").mkdir()
+        empty = MissionLog(adapter.spec.channels["proposer"])
+        schedule.run_domain(
+            "accounting",
+            adapter.tasks(),
+            2,
+            adapter=adapter,
+            prop=empty,
+            runs_root=adapter.spec.runs_root,
+            library_root=second / "library" / "2",
+            feedback_dir=second / "feedback",
+        )
+
+        def written(root):
+            files = sorted(p for p in (root / "runs").rglob("*") if p.is_file())
+            return {
+                p.relative_to(root).as_posix(): p.read_text().replace(str(root), "<root>")
+                for p in files
+            }
+
+        self.assertEqual(written(self.root), written(second))
+        self.assertEqual(
+            sorted((label, mission) for label, _, mission in plain.missions),
+            sorted((label, mission) for label, _, mission in empty.missions),
+        )
+
+        feedback_dir = self.root / "feedback"
+        feedback_dir.mkdir()
+        (feedback_dir / "ledger-1.md").write_text("Keep the credits in the total.\n")
+
+        def statuses():
+            return [row["status"] for row in self.run_stream(feedback_dir=feedback_dir)["tasks"]]
+
+        self.assertEqual(statuses(), ["ok", "skipped"])
+        self.assertEqual(statuses(), ["skipped", "skipped"])
+        (feedback_dir / "ledger-1.md").unlink()
+        self.assertEqual(statuses(), ["ok", "skipped"])
+
+    def test_feedback_never_carries_a_score(self):
+        feedback_dir = self.root / "feedback"
+        feedback_dir.mkdir()
+        (feedback_dir / "team__ledger-1.md").write_text('{"pass_rate": 1}\n')
+        with self.assertRaisesRegex(ValueError, "grader-verdict marker"):
+            feedback.read(feedback_dir, "team/ledger-1")
+        self.assertEqual(feedback.read(feedback_dir, "ledger-2"), "")
+        self.assertEqual(feedback.read(None, "team/ledger-1"), "")
 
 
 if __name__ == "__main__":

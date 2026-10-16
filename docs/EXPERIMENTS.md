@@ -120,3 +120,31 @@ task selection.
 
 Refinement, judging, and reporting use `harness2`, `harness2-judge`, and
 `harness2-report`; each supports `--help`.
+
+## Human feedback
+
+`--feedback-dir` lets a person who has reviewed a task's outputs steer which
+candidate is selected and what lesson enters the library. It is off by default.
+Leave it off for benchmark runs: feedback is a hint toward the answer, so
+results produced with it are not comparable to the paper's.
+
+The folder holds one Markdown file per task, named after the task id with `/`
+replaced by `__`. Write what a good answer for that task must do or avoid. The
+text is served as `context/feedback.md` to the selector and to the experience
+session, and both are told it takes precedence over their own judgement. The
+proposers never see it. The selector sees candidates under shuffled ids, so
+describe what you want rather than naming a run. Feedback is plain text; a file
+containing a grader-verdict marker such as `"pass_rate"` is refused.
+
+To use it on a finished run, review the outputs, write the files, and repeat the
+same command with `--feedback-dir`:
+
+```bash
+harness2 --bench jb --k 2 --mode parallel --feedback-dir feedback/
+```
+
+A task whose feedback was added, changed, or removed is re-run. Rollouts and
+proposer sessions whose inputs did not change are reused, so normally only
+selection and the experience session run again. Later tasks in the same domain
+keep the results they already have. To try it without model credentials, pass
+`--feedback-dir` to `harness2-demo`; its task ids are `ledger-1` and `ledger-2`.
