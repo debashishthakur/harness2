@@ -21,6 +21,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from harness2 import config
+from harness2.cli import run_sweep
 from harness2.core import context, feedback, judge, recursion, schedule, tree
 from harness2.core.library import Library
 from harness2.core.proposer import Proposer, ProposerError, Reply
@@ -260,7 +261,7 @@ class WorkflowTests(unittest.TestCase):
         other = json.loads((runs / "demo-oc-agg2/ledger-2/summary.json").read_text())
         self.assertFalse(any("feedback_fingerprint" in sel for sel in other["selections"].values()))
 
-    def test_feedback_off_changes_nothing_and_new_feedback_reruns_its_task(self):
+    def test_empty_feedback_dir_keeps_prompts_and_outputs(self):
         plain = MissionLog(self.proposer.spec)
         self.run_stream(proposer=plain)
 
@@ -281,10 +282,18 @@ class WorkflowTests(unittest.TestCase):
 
         def written(root):
             files = sorted(p for p in (root / "runs").rglob("*") if p.is_file())
-            return {
-                p.relative_to(root).as_posix(): p.read_text().replace(str(root), "<root>")
-                for p in files
-            }
+            out = {}
+            for p in files:
+                text = p.read_text().replace(str(root), "<root>")
+                if p.name == "summary.json":
+                    # With the flag on, summaries also record the input library; nothing else
+                    # may differ when no task has a note.
+                    summary = json.loads(text)
+                    for sel in summary["selections"].values():
+                        sel.pop("input_library_fingerprint", None)
+                    text = json.dumps(summary)
+                out[p.relative_to(root).as_posix()] = text
+            return out
 
         self.assertEqual(written(self.root), written(second))
         self.assertEqual(
@@ -292,23 +301,92 @@ class WorkflowTests(unittest.TestCase):
             sorted((label, mission) for label, _, mission in empty.missions),
         )
 
+    def test_changed_feedback_reruns_its_task_and_the_later_ones(self):
+        class QuotesNote(DemoProposer):
+            """Stands in for a reflector told to follow the note: its lesson quotes it."""
+
+            def call(self, mission, context_dir, label, **kwargs):
+                reply = super().call(mission, context_dir, label, **kwargs)
+                note = Path(context_dir) / "feedback.md"
+                if label.startswith("experience.") and note.is_file():
+                    reply.text = reply.text.replace(
+                        "lesson: Include both signs",
+                        f"lesson: ({note.read_text().strip()}) Include both signs",
+                    )
+                return reply
+
+        proposer = QuotesNote(self.proposer.spec)
+        self.run_stream(proposer=proposer)
         feedback_dir = self.root / "feedback"
         feedback_dir.mkdir()
-        (feedback_dir / "ledger-1.md").write_text("Keep the credits in the total.\n")
+        note = feedback_dir / "ledger-1.md"
+        later = self.adapter.spec.runs_root / "demo-oc-agg2/ledger-2/context/inv1/library"
+        lesson = later / "harnesses/ledger-1/EXPERIENCE.md"
 
         def statuses():
-            return [row["status"] for row in self.run_stream(feedback_dir=feedback_dir)["tasks"]]
+            rows = self.run_stream(proposer=proposer, feedback_dir=feedback_dir)["tasks"]
+            return [row["status"] for row in rows]
 
-        self.assertEqual(statuses(), ["ok", "skipped"])
+        # Turning feedback on re-runs every task once: older summaries carry no library record.
+        self.assertEqual(statuses(), ["ok", "ok"])
         self.assertEqual(statuses(), ["skipped", "skipped"])
-        (feedback_dir / "ledger-1.md").unlink()
-        self.assertEqual(statuses(), ["ok", "skipped"])
+        note.write_text("Keep the credits in the total.\n")
+        self.assertEqual(statuses(), ["ok", "ok"])
+        self.assertIn("Keep the credits in the total.", lesson.read_text())
+        self.assertEqual(statuses(), ["skipped", "skipped"])
+        note.write_text("Credits count.\n")
+        self.assertEqual(statuses(), ["ok", "ok"])
+        self.assertIn("Credits count.", lesson.read_text())
+        note.unlink()
+        self.assertEqual(statuses(), ["ok", "ok"])
+        self.assertNotIn("Credits count.", lesson.read_text())
+        self.assertEqual(statuses(), ["skipped", "skipped"])
+
+    def test_feedback_dir_is_checked_up_front(self):
+        feedback_dir = self.root / "feedback"
+        feedback_dir.mkdir()
+        (feedback_dir / "ledger-1.md").write_text("Fine.\n")
+        (feedback_dir / "Ledger-2.md").write_text("Wrong case.\n")
+        (feedback_dir / "notes.txt").write_text("Not a task.\n")
+        tasks = self.adapter.tasks()
+        self.assertEqual(feedback.check_dir(feedback_dir, tasks), ["Ledger-2.md", "notes.txt"])
+        self.assertEqual(feedback.read(feedback_dir, "ledger-2"), "")
+        (feedback_dir / "ledger-1.md").write_bytes(b"\xff\xfe")
+        with self.assertRaisesRegex(ValueError, "not UTF-8"):
+            feedback.check_dir(feedback_dir, tasks)
+        with self.assertRaises(FileNotFoundError):
+            feedback.check_dir(self.root / "missing", tasks)
+        with self.assertRaises(FileNotFoundError):
+            feedback.read(self.root / "missing", "ledger-1")
+
+    def test_feedback_marks_the_run_identity_for_good(self):
+        namespace = self.root / "adapt" / "demo-oc-agg1"
+        config_path = namespace / "config.json"
+
+        def check(feedback_dir):
+            args = Mock(
+                substrate="oc",
+                split="all",
+                seed=None,
+                only_domains="",
+                max_tasks=None,
+                feedback_dir=feedback_dir,
+            )
+            run_sweep._check_identity(self.adapter, args, namespace)
+            return json.loads(config_path.read_text())
+
+        self.assertNotIn("feedback", check(None))
+        self.assertNotIn("feedback", check(None))
+        self.assertTrue(check(self.root)["feedback"])
+        self.assertTrue(check(self.root)["feedback"])
+        with self.assertRaisesRegex(ValueError, "steered by human feedback"):
+            check(None)
 
     def test_feedback_never_carries_a_score(self):
         feedback_dir = self.root / "feedback"
         feedback_dir.mkdir()
         (feedback_dir / "team__ledger-1.md").write_text('{"pass_rate": 1}\n')
-        with self.assertRaisesRegex(ValueError, "grader-verdict marker"):
+        with self.assertRaisesRegex(ValueError, "grader-output marker"):
             feedback.read(feedback_dir, "team/ledger-1")
         self.assertEqual(feedback.read(feedback_dir, "ledger-2"), "")
         self.assertEqual(feedback.read(None, "team/ledger-1"), "")

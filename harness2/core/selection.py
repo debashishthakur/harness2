@@ -318,11 +318,7 @@ def run_selection(
             ),
             "# YOUR EVIDENCE\n\nIt is on disk. Read it -- do not answer from this message alone.\n\n"
             "context/task.md                 the instructions\n"
-            + (
-                "context/feedback.md             notes from the person who reviewed this task\n"
-                if feedback
-                else ""
-            )
+            + (context.FEEDBACK_LAYOUT_LINE + "\n" if feedback else "")
             + "context/source/                 task source materials, when supplied\n"
             f"context/candidates/<id>.md      one file per candidate: {ids}\n"
             + a_evid

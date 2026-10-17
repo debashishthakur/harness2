@@ -20,6 +20,7 @@ import argparse
 import json
 from pathlib import Path
 
+from ..core import feedback
 from ..core.schedule import mode_token, run_domain
 from ..demo import DemoAdapter, DemoProposer
 
@@ -39,6 +40,10 @@ def main(argv=None) -> int:
         parser.error(f"--feedback-dir {args.feedback_dir} is not a directory")
     root = args.output.expanduser().resolve()
     adapter = DemoAdapter(root)
+    if args.feedback_dir is not None:
+        unmatched = feedback.check_dir(args.feedback_dir, adapter.tasks())
+        if unmatched:
+            print(f"feedback: ignoring {', '.join(unmatched)} (no such task)")
     proposer = DemoProposer(adapter.spec.channels["proposer"])
     modes = ("agg", "seq") if args.mode == "both" else (mode_token(args.mode),)
     result = run_domain(

@@ -16,15 +16,17 @@
 
     <feedback-dir>/<task-slug>.md      free text from the person running the sweep
 
-Off unless a directory is passed. The text reaches the selector and the experience session,
-never the proposers. It is a hint toward the answer, so benchmark runs leave it off; the
-grader-verdict tripwire still applies to it, and feedback carrying a score is refused.
+Off unless a directory is passed. The text is served to this task's selector and experience
+session, never to its proposers; what those two sessions take from it reaches later tasks in
+the domain through the library. It is a hint toward the answer, so benchmark runs leave it
+off. Feedback containing a grader-output marker is refused.
 """
 
 from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from typing import Iterable
 
 from . import context
 from .library import slug
@@ -34,21 +36,55 @@ def path_for(feedback_dir: Path | str, task_id: str) -> Path:
     return Path(feedback_dir) / f"{slug(task_id)}.md"
 
 
-def read(feedback_dir: Path | str | None, task_id: str) -> str:
-    """The task's feedback text, or "" when there is no directory, no file, or an empty one."""
-    if feedback_dir is None:
-        return ""
-    path = path_for(feedback_dir, task_id)
-    if not path.is_file():
-        return ""
-    text = path.read_text(encoding="utf-8").strip()
+def _text(path: Path) -> str:
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{path} is not UTF-8 text: {exc}") from None
     for marker in context.GRADER_VERDICT_MARKERS:
         if marker in text:
             raise ValueError(
-                f"{path} contains grader-verdict marker {marker!r}; feedback is text for the "
-                f"selector and the reflector, not a score"
+                f"{path} contains grader-output marker {marker!r}; feedback is notes for the "
+                f"selector and the reflector, not grader output"
             )
     return text
+
+
+def read(feedback_dir: Path | str | None, task_id: str) -> str:
+    """The task's feedback text, or "" when there is no directory, no file, or an empty one.
+
+    The file name must match exactly, also on case-insensitive file systems.
+    """
+    if feedback_dir is None:
+        return ""
+    root = Path(feedback_dir)
+    if not root.is_dir():
+        raise FileNotFoundError(f"feedback directory {root} does not exist")
+    path = path_for(root, task_id)
+    if path.name not in {p.name for p in root.iterdir() if p.is_file()}:
+        return ""
+    return _text(path)
+
+
+def check_dir(feedback_dir: Path | str, task_ids: Iterable[str]) -> list[str]:
+    """Read every file before the first rollout; return the names that match no task.
+
+    Raises on a missing directory, a file that is not UTF-8, or a grader-output marker, so a
+    bad note fails the run up front rather than one task partway through a stream.
+    """
+    root = Path(feedback_dir)
+    if not root.is_dir():
+        raise FileNotFoundError(f"feedback directory {root} does not exist")
+    expected = {f"{slug(t)}.md" for t in task_ids}
+    unmatched = []
+    for p in sorted(root.iterdir()):
+        if not p.is_file():
+            continue
+        if p.name in expected:
+            _text(p)
+        else:
+            unmatched.append(p.name)
+    return unmatched
 
 
 def fingerprint(text: str) -> str:

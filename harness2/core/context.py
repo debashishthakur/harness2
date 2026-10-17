@@ -39,6 +39,10 @@ from typing import Mapping, Sequence
 from . import tree as harness_tree
 from .spec import BenchmarkAdapter, RunView
 
+FEEDBACK_LAYOUT_LINE = (
+    "context/feedback.md             notes from the person who reviewed this task"
+)
+
 
 @dataclass
 class ContextTree:
@@ -63,9 +67,7 @@ class ContextTree:
         """The evidence-layout listing that goes in the mission; only mentions what exists."""
         lines = ["context/task.md                  the task as the agent received it"]
         if self.feedback:
-            lines.append(
-                "context/feedback.md             notes from the person who reviewed this task"
-            )
+            lines.append(FEEDBACK_LAYOUT_LINE)
         if self.source_files:
             lines.append("context/source/                 task source materials")
         if self.decisions:
